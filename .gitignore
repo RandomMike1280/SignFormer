@@ -1,0 +1,12 @@
+# Ignore dataset files
+dataset*
+
+# Ignore model files
+model*
+
+# Ignore tokenizer artifacts
+tokenizer*
+
+# Common Python artifacts
+__pycache__/
+*.py[cod]

@@ -5,10 +5,10 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 tokenizer = CharacterLevelTokenizer.load("tokenizer.pkl")
-model = Network(num_heads=8,
+model = Network(num_heads=32,
                 num_layer=6,
                 input_dim=1024,
-                context_window=1024,
+                context_window=32,
                 dim=256,
                 hidden_dim=256,
                 vocab_size=len(tokenizer),
@@ -19,7 +19,7 @@ model = Network(num_heads=8,
 model.to(device="cpu", dtype=torch.float32)
 model.train()
 
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = optim.Adam(model.parameters(), lr=0.1e-4)
 criterion = torch.nn.CrossEntropyLoss()
 
 with open("dataset.txt", encoding="utf-8") as f:
@@ -37,24 +37,32 @@ class Dataset(torch.utils.data.Dataset):
         return self.num_sequences
 
     def __getitem__(self, idx):
-        seq = self.tokens[idx:idx + self.context_length]
-        target = self.tokens[idx + self.context_length]
-        return torch.tensor(seq), torch.tensor(target)
+        l = len(self.tokens)
+        x = self.tokens[idx:min(l, idx + self.context_length)]
+        y = self.tokens[min(l, idx + 1):min(l, idx + self.context_length + 1)]
+        return torch.tensor(x), torch.tensor(y)
 
-dataset = Dataset(text, tokenizer, context_length=64)
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=128, shuffle=True)
+context_window = 32
+n = int(0.9 * len(text))
+train_data = text[:n]
+val_data = text[n:]
+dataset = Dataset(train_data, tokenizer, context_length=context_window)
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
 
-for epoch in range(10):
+for epoch in range(5):
     t = 0
-    for sequences, targets in dataloader:
+    for x, y in dataloader: # iterating over batches
         optimizer.zero_grad()
-        logits = model(sequences)
-        loss = criterion(logits, targets)
+        logits = model(x)
+        B, T, C = logits.shape
+        logits = logits.view(B*T, C)
+        y = y.view(B*T)
+        loss = criterion(logits, y)
         loss.backward()
         optimizer.step()
         t += 1
         print(f"Batch {t}/{len(dataloader)}")
-        if t == 100:
+        if t == 5:  # just to speed up training for testing
             break
     print(f"Epoch {epoch+1}, Loss: {loss.item()}")
 

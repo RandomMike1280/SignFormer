@@ -127,7 +127,8 @@ class Network(nn.Module):
         x = self.pos_embed(x)
         for block in self.transformer:
             x = block(x)
-        x = self.out(x[:, -1, :])
+        # x = self.out(x[:, -1, :])
+        x = self.out(x)
         return x
 
     def generate(self, x, max_length:int, temperature:float, stop_token:str=None):
@@ -137,6 +138,7 @@ class Network(nn.Module):
         if stop_token:
             while x.size(1) < self.context_window:
                 probs = self.forward(x)
+                probs = probs[:, -1, :]
                 probs = F.softmax(probs / temperature, dim=-1)
                 token = torch.multinomial(probs, 1)
                 x = torch.cat([x, token], dim=-1)
@@ -146,6 +148,8 @@ class Network(nn.Module):
             with torch.no_grad():
                 for _ in range(max_length):
                     probs = self.forward(x)
+                    probs = probs[:, -1, :]
+                    # print(probs.shape)
                     probs = F.softmax(probs / temperature, dim=-1)
                     token = torch.multinomial(probs, 1)
                     x = torch.cat([x, token], dim=-1)
@@ -157,10 +161,10 @@ if __name__ == "__main__":
     with open("dataset.txt", "r") as f:
         text = f.read()
     tokenizer = CharacterLevelTokenizer().load("tokenizer.pkl")
-    model = Network(num_heads=8,
+    model = Network(num_heads=32,
                 num_layer=6,
                 input_dim=1024,
-                context_window=1024,
+                context_window=32,
                 dim=256,
                 hidden_dim=256,
                 vocab_size=65,
@@ -169,11 +173,11 @@ if __name__ == "__main__":
                 dtype=torch.float32)
     model.load_state_dict(torch.load("model.pt"))
     ModelSummary(model)
-    x = torch.tensor(tokenizer.encode(" "))
+    x = torch.tensor(tokenizer.encode("H"))
     # print(x)
     y = model(x)
     # print(y.shape)
-    seq = model.generate(x, max_length=65, temperature=1.0)
+    seq = model.generate(x, max_length=32, temperature=1.0)
     # print(seq)
     seq = list(seq[0].tolist())
     print(seq)

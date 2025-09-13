@@ -5,21 +5,19 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 tokenizer = CharacterLevelTokenizer.load("tokenizer.pkl")
-model = Network(num_heads=32,
+model = Network(num_heads=6,
                 num_layer=6,
-                input_dim=1024,
-                context_window=32,
-                dim=256,
-                hidden_dim=256,
+                n_embed=384,
+                context_window=512,
                 vocab_size=len(tokenizer),
-                dropout=0.1,
+                dropout=0.2,
                 device="cpu",
                 dtype=torch.float32)
 
 model.to(device="cpu", dtype=torch.float32)
 model.train()
 
-optimizer = optim.Adam(model.parameters(), lr=0.1e-4)
+optimizer = optim.AdamW(model.parameters(), lr=3e-4)
 criterion = torch.nn.CrossEntropyLoss()
 
 with open("dataset.txt", encoding="utf-8") as f:
@@ -42,14 +40,14 @@ class Dataset(torch.utils.data.Dataset):
         y = self.tokens[min(l, idx + 1):min(l, idx + self.context_length + 1)]
         return torch.tensor(x), torch.tensor(y)
 
-context_window = 32
+context_window = 256
 n = int(0.9 * len(text))
 train_data = text[:n]
 val_data = text[n:]
 dataset = Dataset(train_data, tokenizer, context_length=context_window)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
 
-for epoch in range(5):
+for epoch in range(100):
     t = 0
     for x, y in dataloader: # iterating over batches
         optimizer.zero_grad()
@@ -61,8 +59,8 @@ for epoch in range(5):
         loss.backward()
         optimizer.step()
         t += 1
-        print(f"Batch {t}/{len(dataloader)}")
-        if t == 5:  # just to speed up training for testing
+        # print(f"Batch {t}/{len(dataloader)}")
+        if t == 10:  # just to speed up training for testing
             break
     print(f"Epoch {epoch+1}, Loss: {loss.item()}")
 

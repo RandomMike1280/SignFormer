@@ -6,12 +6,12 @@ import math
 from tokenizer import CharacterLevelTokenizer
 
 class dot_product_attention(nn.Module):
-    def __init__(self, dropout=0.1, device="cpu", dtype=torch.bfloat16, input_dim=1024, dim=32, context_window=1024):
+    def __init__(self, dropout=0.1, device="cpu", dtype=torch.bfloat16, input_dim=1024, head_size=32, context_window=1024):
         super(dot_product_attention, self).__init__()
         self.dropout = nn.Dropout(dropout)
         self.device = device
         self.dtype = dtype
-        self.dim = dim
+        self.head_size = head_size
 
         try:
             mask = torch.tril(torch.ones((context_window, context_window), device=device, dtype=dtype))
@@ -20,31 +20,31 @@ class dot_product_attention(nn.Module):
             mask = torch.tril(torch.ones((context_window, context_window), device=device, dtype=torch.bfloat16))
             self.register_buffer("mask", mask) 
 
-        self.qkv = nn.Linear(input_dim, 3 * dim, dtype=dtype)
+        self.qkv = nn.Linear(input_dim, 3 * head_size, dtype=dtype, bias=False)
         self.to(device=device, dtype=dtype)
 
     def forward(self, x):
         qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)
-        k_t = k.transpose(-2, -1)
-        seq_len = q.size(-2)
+        q, k, v = qkv.chunk(3, dim=-1) # (B, T, head_size) each
+        k_t = k.transpose(-2, -1) # (B, C, T)
+        B, T, C = x.shape
 
 
-        dots = torch.matmul(q, k_t) * (self.dim ** -0.5)
-        dots = dots.masked_fill(self.mask[:seq_len, :seq_len] == 0, torch.finfo(self.dtype).min)
+        dots = torch.matmul(q, k_t) * (self.head_size ** -0.5) # (B, T, T)
+        dots = dots.masked_fill(self.mask[:T, :T] == 0, float('-inf')) # (B, T, T)
         attn = dots.softmax(dim=-1)
         attn = self.dropout(attn)
 
-        out = torch.matmul(attn, v)
+        out = torch.matmul(attn, v) # (B, T, head_size)
         return out
 
 class Multihead_Attention(nn.Module):
-    def __init__(self, num_heads, input_dim, context_window, dim, dropout=0.1, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, num_heads, n_embed, context_window, head_size, dropout=0.1, device="cpu", dtype=torch.bfloat16):
         super(Multihead_Attention, self).__init__()
         self.heads = nn.ModuleList()
         for _ in range(num_heads):
-            self.heads.append(dot_product_attention(dropout=dropout, device=device, dtype=dtype, input_dim=input_dim, context_window=context_window, dim=dim))
-        self.proj = nn.Linear(num_heads * dim, input_dim)
+            self.heads.append(dot_product_attention(dropout=dropout, device=device, dtype=dtype, input_dim=n_embed, context_window=context_window, head_size=head_size))
+        self.proj = nn.Linear(n_embed, n_embed)
         self.dropout = nn.Dropout(dropout)
         self.to(device=device, dtype=dtype)
 
@@ -54,30 +54,31 @@ class Multihead_Attention(nn.Module):
         return out
 
 class FeedForward(nn.Module):
-    def __init__(self, input_dim, hidden_dim, dropout=0.1, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, input_dim, dropout=0.1, device="cpu", dtype=torch.bfloat16):
         super(FeedForward, self).__init__()
-        self.fc1 = nn.Linear(input_dim, hidden_dim*4, dtype=dtype)
-        self.fc2 = nn.Linear(hidden_dim*4, input_dim, dtype=dtype)
+        self.fc1 = nn.Linear(input_dim, input_dim*4, dtype=dtype)
+        self.fc2 = nn.Linear(input_dim*4, input_dim, dtype=dtype)
         self.dropout = nn.Dropout(dropout)
         self.to(device=device, dtype=dtype)
 
     def forward(self, x):
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.fc2(x)
+        x = F.relu(self.fc1(x))
+        x = self.dropout((self.fc2(x)))
         return x
 
 class TransformerBlock(nn.Module):
-    def __init__(self, num_heads, input_dim, context_window, dim, hidden_dim, dropout=0.1, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, num_heads, n_embed, context_window, dropout=0.1, device="cpu", dtype=torch.bfloat16):
         super(TransformerBlock, self).__init__()
-        self.attn = Multihead_Attention(num_heads, input_dim, context_window, dim, dropout=dropout, device=device, dtype=dtype)
-        self.ff = FeedForward(input_dim, hidden_dim, dropout=dropout, device=device, dtype=dtype)
-        self.ln1 = nn.LayerNorm(input_dim, dtype=dtype)
-        self.ln2 = nn.LayerNorm(input_dim, dtype=dtype)
+        head_size = n_embed // num_heads
+        self.attn = Multihead_Attention(num_heads, n_embed, context_window, head_size=head_size, dropout=dropout, device=device, dtype=dtype)
+        self.ff = FeedForward(n_embed, dropout=dropout, device=device, dtype=dtype)
+        self.ln1 = nn.LayerNorm(n_embed, dtype=dtype)
+        self.ln2 = nn.LayerNorm(n_embed, dtype=dtype)
         self.to(device=device, dtype=dtype)
 
     def forward(self, x):
-        x = self.ln1(x + self.attn(x))
-        x = self.ln2(x + self.ff(x))
+        x = x + self.attn(self.ln1(x))
+        x = x + self.ff(self.ln2(x))
         return x
 
 class PosEmbedding(nn.Module):
@@ -105,26 +106,29 @@ class PosEmbedding(nn.Module):
         return x
 
 class Network(nn.Module):
-    def __init__(self, num_heads, num_layer, input_dim, context_window, dim, hidden_dim, vocab_size, dropout=0.1, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, num_heads, num_layer, n_embed, context_window, vocab_size, dropout=0.1, device="cpu", dtype=torch.bfloat16):
         super(Network, self).__init__()
-        self.emb = nn.Embedding(vocab_size, input_dim, dtype=dtype)
-        self.pos_embed = PosEmbedding(input_dim, context_window, device=device, dtype=dtype)
+        self.emb = nn.Embedding(vocab_size, n_embed, dtype=dtype)
+        # self.pos_embed = PosEmbedding(input_dim, context_window, device=device, dtype=dtype)
+        self.pos_embed = nn.Embedding(context_window, n_embed, dtype=dtype)
         self.transformer = nn.ModuleList()
         for _ in range(num_layer):
-            self.transformer.append(TransformerBlock(num_heads, input_dim, context_window, dim, hidden_dim, dropout=dropout, device=device, dtype=dtype))
-        self.to(device=device, dtype=dtype)
-        self.out = nn.Linear(input_dim, vocab_size, dtype=dtype)
+            self.transformer.append(TransformerBlock(num_heads, n_embed, context_window, dropout=dropout, device=device, dtype=dtype))
+        self.transformer.append(nn.LayerNorm(n_embed, dtype=dtype))
+        self.out = nn.Linear(n_embed, vocab_size, dtype=dtype)
         # self.emb.weight = self.out.weight
         self.to(device=device, dtype=dtype)
         self.dtype = dtype
         self.device = device
-        self.d_model = input_dim
+        self.d_model = n_embed
         self.context_window = context_window
 
     def forward(self, x):
+        B, T = x.shape
+        idx = torch.arange(T, device=self.device)
         x = x.to(device=self.device, dtype=torch.int32)
         x = self.emb(x) * (self.d_model ** 0.5)
-        x = self.pos_embed(x)
+        x += self.pos_embed(idx)
         for block in self.transformer:
             x = block(x)
         # x = self.out(x[:, -1, :])
@@ -161,23 +165,21 @@ if __name__ == "__main__":
     with open("dataset.txt", "r") as f:
         text = f.read()
     tokenizer = CharacterLevelTokenizer().load("tokenizer.pkl")
-    model = Network(num_heads=32,
-                num_layer=6,
-                input_dim=1024,
-                context_window=32,
-                dim=256,
-                hidden_dim=256,
+    model = Network(num_heads=4,
+                num_layer=4,
+                n_embed=128,
+                context_window=512,
                 vocab_size=65,
                 dropout=0.1,
                 device="cpu",
                 dtype=torch.float32)
     model.load_state_dict(torch.load("model.pt"))
     ModelSummary(model)
-    x = torch.tensor(tokenizer.encode("H"))
+    x = torch.tensor(tokenizer.encode("C")).unsqueeze(0)
     # print(x)
     y = model(x)
     # print(y.shape)
-    seq = model.generate(x, max_length=32, temperature=1.0)
+    seq = model.generate(x, max_length=500, temperature=1.0)
     # print(seq)
     seq = list(seq[0].tolist())
     print(seq)

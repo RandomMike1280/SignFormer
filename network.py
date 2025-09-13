@@ -101,16 +101,16 @@ class PosEmbedding(nn.Module):
         self.register_buffer('pe', pe)
         
     def forward(self, x):
-        seq_len = x.size(1)
-        x = x + self.pe[:, :seq_len]
+        B, T, C = x.shape
+        x = x + self.pe[:, :T]
         return x
 
 class Network(nn.Module):
     def __init__(self, num_heads, num_layer, n_embed, context_window, vocab_size, dropout=0.1, device="cpu", dtype=torch.bfloat16):
         super(Network, self).__init__()
         self.emb = nn.Embedding(vocab_size, n_embed, dtype=dtype)
-        # self.pos_embed = PosEmbedding(input_dim, context_window, device=device, dtype=dtype)
-        self.pos_embed = nn.Embedding(context_window, n_embed, dtype=dtype)
+        self.pos_embed = PosEmbedding(n_embed, context_window, device=device, dtype=dtype)
+        # self.pos_embed = nn.Embedding(context_window, n_embed, dtype=dtype)
         self.transformer = nn.ModuleList()
         for _ in range(num_layer):
             self.transformer.append(TransformerBlock(num_heads, n_embed, context_window, dropout=dropout, device=device, dtype=dtype))
@@ -125,17 +125,17 @@ class Network(nn.Module):
 
     def forward(self, x):
         B, T = x.shape
-        idx = torch.arange(T, device=self.device)
+        # idx = torch.arange(T, device=self.device)
         x = x.to(device=self.device, dtype=torch.int32)
         x = self.emb(x) * (self.d_model ** 0.5)
-        x += self.pos_embed(idx)
+        x = self.pos_embed(x)
         for block in self.transformer:
             x = block(x)
         # x = self.out(x[:, -1, :])
         x = self.out(x)
         return x
 
-    def generate(self, x, max_length:int, temperature:float, stop_token:str=None):
+    def generate(self, x, max_length:int, temperature:float, stop_token:str=""):
         if len(x.size()) == 1:
             x = x.unsqueeze(0)
         self.eval()

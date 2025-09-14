@@ -4,14 +4,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from tokenizer import CharacterLevelTokenizer
+from torchtune.modules import KVCache
 
 class dot_product_attention(nn.Module):
-    def __init__(self, dropout=0.1, device="cpu", dtype=torch.bfloat16, input_dim=1024, head_size=32, context_window=1024):
+    def __init__(self, dropout=0.1, use_kv_cache=False, device="cpu", dtype=torch.bfloat16, input_dim=1024, head_size=32, context_window=1024):
         super(dot_product_attention, self).__init__()
         self.dropout = nn.Dropout(dropout)
         self.device = device
         self.dtype = dtype
         self.head_size = head_size
+        self.context_window = context_window
 
         try:
             mask = torch.tril(torch.ones((context_window, context_window), device=device, dtype=dtype))
@@ -22,28 +24,57 @@ class dot_product_attention(nn.Module):
 
         self.qkv = nn.Linear(input_dim, 3 * head_size, dtype=dtype, bias=False)
         self.to(device=device, dtype=dtype)
+        self.use_kv_cache = use_kv_cache
+        self.kv_cache = None
 
     def forward(self, x):
-        qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1) # (B, T, head_size) each
-        k_t = k.transpose(-2, -1) # (B, C, T)
         B, T, C = x.shape
 
+        if self.use_kv_cache:
+            if self.kv_cache is None:
+                qkv = self.qkv(x)
+                q, k, v = qkv.chunk(3, dim=-1) # (B, T, head_size) each
+                k_t = k.transpose(-2, -1) # (B, C, T)
+                self.kv_cache = KVCache(batch_size=B,
+                                        max_seq_len=self.context_window,
+                                        num_kv_heads=1,
+                                        head_dim=self.head_size,
+                                        dtype=self.dtype
+                                        )
+                
+                self.kv_cache = self.kv_cache.to(self.device)
+                kf, vf = k.unsqueeze(1), v.unsqueeze(1) # (B, 1, T, head_size) for the num heads dimension
+
+                cached_k, cached_v =self.kv_cache.update(kf, vf)
+            else:
+                last_token = x[:, -1:, :] # (B, 1, C)
+                qkv = self.qkv(last_token)
+                q, k, v = qkv.chunk(3, dim=-1) # (B, 1, head_size) each
+
+                kf, vf = k.unsqueeze(1), v.unsqueeze(1) # (B, 1, 1, head_size) for the num heads dimension
+                cached_k, cached_v = self.kv_cache.update(kf, vf)
+            cached_k, v = cached_k.squeeze(1), cached_v.squeeze(1) # (B, T, head_size)
+            cached_k, v = cached_k[:, :T, :], v[:, :T, :] # (B, T, head_size)
+            k_t = cached_k.transpose(-2, -1) # (B, head_size, T)
+        else:
+            qkv = self.qkv(x)
+            q, k, v = qkv.chunk(3, dim=-1)
+            k_t = k.transpose(-2, -1) # (B, head_size, T)
 
         dots = torch.matmul(q, k_t) * (self.head_size ** -0.5) # (B, T, T)
         dots = dots.masked_fill(self.mask[:T, :T] == 0, float('-inf')) # (B, T, T)
         attn = dots.softmax(dim=-1)
         attn = self.dropout(attn)
-
+        # print(k_t.shape, v.shape)
         out = torch.matmul(attn, v) # (B, T, head_size)
         return out
 
 class Multihead_Attention(nn.Module):
-    def __init__(self, num_heads, n_embed, context_window, head_size, dropout=0.1, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, num_heads, n_embed, context_window, head_size, dropout=0.1, use_kv_cache=False, device="cpu", dtype=torch.bfloat16):
         super(Multihead_Attention, self).__init__()
         self.heads = nn.ModuleList()
         for _ in range(num_heads):
-            self.heads.append(dot_product_attention(dropout=dropout, device=device, dtype=dtype, input_dim=n_embed, context_window=context_window, head_size=head_size))
+            self.heads.append(dot_product_attention(dropout=dropout, device=device, dtype=dtype, input_dim=n_embed, context_window=context_window, head_size=head_size, use_kv_cache=use_kv_cache))
         self.proj = nn.Linear(n_embed, n_embed)
         self.dropout = nn.Dropout(dropout)
         self.to(device=device, dtype=dtype)
@@ -67,10 +98,10 @@ class FeedForward(nn.Module):
         return x
 
 class TransformerBlock(nn.Module):
-    def __init__(self, num_heads, n_embed, context_window, dropout=0.1, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, num_heads, n_embed, context_window, dropout=0.1, use_kv_cache=False, device="cpu", dtype=torch.bfloat16):
         super(TransformerBlock, self).__init__()
         head_size = n_embed // num_heads
-        self.attn = Multihead_Attention(num_heads, n_embed, context_window, head_size=head_size, dropout=dropout, device=device, dtype=dtype)
+        self.attn = Multihead_Attention(num_heads, n_embed, context_window, head_size=head_size, dropout=dropout, device=device, dtype=dtype, use_kv_cache=use_kv_cache)
         self.ff = FeedForward(n_embed, dropout=dropout, device=device, dtype=dtype)
         self.ln1 = nn.LayerNorm(n_embed, dtype=dtype)
         self.ln2 = nn.LayerNorm(n_embed, dtype=dtype)
@@ -106,14 +137,14 @@ class PosEmbedding(nn.Module):
         return x
 
 class Network(nn.Module):
-    def __init__(self, num_heads, num_layer, n_embed, context_window, vocab_size, dropout=0.1, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, num_heads, num_layer, n_embed, context_window, vocab_size, dropout=0.1, use_kv_cache=False, device="cpu", dtype=torch.bfloat16):
         super(Network, self).__init__()
         self.emb = nn.Embedding(vocab_size, n_embed, dtype=dtype)
         self.pos_embed = PosEmbedding(n_embed, context_window, device=device, dtype=dtype)
         # self.pos_embed = nn.Embedding(context_window, n_embed, dtype=dtype)
         self.transformer = nn.ModuleList()
         for _ in range(num_layer):
-            self.transformer.append(TransformerBlock(num_heads, n_embed, context_window, dropout=dropout, device=device, dtype=dtype))
+            self.transformer.append(TransformerBlock(num_heads, n_embed, context_window, dropout=dropout, use_kv_cache=use_kv_cache, device=device, dtype=dtype))
         self.transformer.append(nn.LayerNorm(n_embed, dtype=dtype))
         self.out = nn.Linear(n_embed, vocab_size, dtype=dtype)
         # self.emb.weight = self.out.weight
@@ -168,9 +199,10 @@ if __name__ == "__main__":
                     context_window=512,
                     vocab_size=len(tokenizer),
                     dropout=0.2,
+                    use_kv_cache=True,
                     device="cpu",
                     dtype=torch.float32)
-    model.load_state_dict(torch.load("model.pt"))
+    # model.load_state_dict(torch.load("model.pt"))
     ModelSummary(model)
     x = torch.tensor(tokenizer.encode("C")).unsqueeze(0)
     # print(x)

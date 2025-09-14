@@ -62,7 +62,6 @@ class LazyDataset(torch.utils.data.Dataset):
 context_window = 512
 dataset = LazyDataset("dataset.txt", tokenizer, context_length=context_window, chunk_size=5000)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
-scaler = torch.cuda.amp.GradScaler()
 
 for epoch in range(1000):
     t = 0

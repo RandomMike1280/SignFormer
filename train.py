@@ -4,64 +4,88 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
+if device == "cuda":
+    from torch import amp
+print(f"Using {device}")
+
 tokenizer = CharacterLevelTokenizer.load("tokenizer.pkl")
-model = Network(num_heads=6,
-                num_layer=6,
+model = Network(num_heads=4,
+                num_layer=4,
                 n_embed=384,
                 context_window=512,
                 vocab_size=len(tokenizer),
                 dropout=0.2,
-                device="cpu",
-                dtype=torch.float32)
+                device=device,
+                dtype=torch.bfloat16)
 
-model.to(device="cpu", dtype=torch.float32)
+model.to(device=device, dtype=torch.bfloat16)
 model.train()
 
 optimizer = optim.AdamW(model.parameters(), lr=3e-4)
 criterion = torch.nn.CrossEntropyLoss()
 
-with open("dataset.txt", encoding="utf-8") as f:
-    text = f.read()
-
-class Dataset(torch.utils.data.Dataset):
-    def __init__(self, text, tokenizer, context_length):
-        self.text = text
+class LazyDataset(torch.utils.data.Dataset):
+    def __init__(self, file_path, tokenizer, context_length, chunk_size=1000):
+        self.file_path = file_path
         self.tokenizer = tokenizer
         self.context_length = context_length
-        self.tokens = torch.tensor(tokenizer.encode(text))
-        self.num_sequences = len(self.tokens) - context_length
+        self.chunk_size = chunk_size
+
+        # Precompute file size
+        with open(file_path, encoding="utf-8") as f:
+            f.seek(0, 2)
+            self.file_size = f.tell()
 
     def __len__(self):
-        return self.num_sequences
+        # Approximate: total size / chunk size
+        return self.file_size // self.chunk_size
 
     def __getitem__(self, idx):
-        l = len(self.tokens)
-        x = self.tokens[idx:min(l, idx + self.context_length)]
-        y = self.tokens[min(l, idx + 1):min(l, idx + self.context_length + 1)]
-        return torch.tensor(x), torch.tensor(y)
+        with open(self.file_path, encoding="utf-8") as f:
+            f.seek(idx * self.chunk_size)
+            text_chunk = f.read(self.chunk_size)
 
-context_window = 256
-n = int(0.9 * len(text))
-train_data = text[:n]
-val_data = text[n:]
-dataset = Dataset(train_data, tokenizer, context_length=context_window)
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=64, shuffle=True)
+        tokens = torch.tensor(self.tokenizer.encode(text_chunk), dtype=torch.long)
 
-for epoch in range(100):
+        # ensure enough tokens for context_length
+        if len(tokens) < self.context_length + 1:
+            raise IndexError("Not enough tokens in chunk.")
+
+        start = torch.randint(0, len(tokens) - self.context_length - 1, (1,)).item()
+        x = tokens[start:start+self.context_length]
+        y = tokens[start+1:start+self.context_length+1]
+        return x, y
+
+
+# Usage
+context_window = 512
+dataset = LazyDataset("dataset.txt", tokenizer, context_length=context_window, chunk_size=5000)
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
+scaler = torch.cuda.amp.GradScaler()
+
+for epoch in range(1000):
     t = 0
-    for x, y in dataloader: # iterating over batches
+    for x, y in dataloader:  # iterating over streamed batches
+        x = x.to(device)
+        y = y.to(device)
         optimizer.zero_grad()
-        logits = model(x)
-        B, T, C = logits.shape
-        logits = logits.view(B*T, C)
-        y = y.view(B*T)
-        loss = criterion(logits, y)
+        if device == "cuda":
+            with amp.autocast("cuda", dtype=torch.bfloat16):
+                    logits = model(x)
+                    B, T, C = logits.shape
+                    logits = logits.view(B*T, C)
+                    y = y.view(B*T)
+                    loss = criterion(logits, y)
+        else:
+            logits = model(x)
+            B, T, C = logits.shape
+            logits = logits.view(B*T, C)
+            y = y.view(B*T)
+            loss = criterion(logits, y) 
         loss.backward()
         optimizer.step()
         t += 1
-        # print(f"Batch {t}/{len(dataloader)}")
-        if t == 10:  # just to speed up training for testing
-            break
     print(f"Epoch {epoch+1}, Loss: {loss.item()}")
 
 #  = model.generate(torch.tensor([[0]]), max_length=64, temperature=1.0)

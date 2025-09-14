@@ -123,6 +123,14 @@ class Network(nn.Module):
         self.d_model = n_embed
         self.context_window = context_window
 
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
     def forward(self, x):
         B, T = x.shape
         # idx = torch.arange(T, device=self.device)
@@ -135,28 +143,17 @@ class Network(nn.Module):
         x = self.out(x)
         return x
 
-    def generate(self, x, max_length:int, temperature:float, stop_token:str=""):
+    def generate(self, x, max_length:int):
         if len(x.size()) == 1:
             x = x.unsqueeze(0)
         self.eval()
-        if stop_token:
-            while x.size(1) < self.context_window:
-                probs = self.forward(x)
-                probs = probs[:, -1, :]
-                probs = F.softmax(probs / temperature, dim=-1)
-                token = torch.multinomial(probs, 1)
+        with torch.no_grad():
+            for _ in range(max_length):
+                logits = self(x)
+                logits = logits[:, -1, :]
+                probs = F.softmax(logits, dim=-1)
+                token = torch.multinomial(probs, num_samples=1)
                 x = torch.cat([x, token], dim=-1)
-                if x == stop_token:
-                    break
-        else:
-            with torch.no_grad():
-                for _ in range(max_length):
-                    probs = self.forward(x)
-                    probs = probs[:, -1, :]
-                    # print(probs.shape)
-                    probs = F.softmax(probs / temperature, dim=-1)
-                    token = torch.multinomial(probs, 1)
-                    x = torch.cat([x, token], dim=-1)
         return x
         
 
@@ -165,21 +162,21 @@ if __name__ == "__main__":
     with open("dataset.txt", "r") as f:
         text = f.read()
     tokenizer = CharacterLevelTokenizer().load("tokenizer.pkl")
-    model = Network(num_heads=4,
-                num_layer=4,
-                n_embed=128,
-                context_window=512,
-                vocab_size=65,
-                dropout=0.1,
-                device="cpu",
-                dtype=torch.float32)
+    model = Network(num_heads=6,
+                    num_layer=6,
+                    n_embed=384,
+                    context_window=512,
+                    vocab_size=len(tokenizer),
+                    dropout=0.2,
+                    device="cpu",
+                    dtype=torch.float32)
     model.load_state_dict(torch.load("model.pt"))
     ModelSummary(model)
     x = torch.tensor(tokenizer.encode("C")).unsqueeze(0)
     # print(x)
     y = model(x)
     # print(y.shape)
-    seq = model.generate(x, max_length=500, temperature=1.0)
+    seq = model.generate(x, max_length=500)
     # print(seq)
     seq = list(seq[0].tolist())
     print(seq)

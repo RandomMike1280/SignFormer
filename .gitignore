@@ -5,7 +5,7 @@ dataset*
 model*
 
 # Ignore tokenizer artifacts
-tokenizer*
+tokenizer.plk
 
 # Common Python artifacts
 __pycache__/

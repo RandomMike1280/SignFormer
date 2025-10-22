@@ -1,39 +1,50 @@
-import torch
-import torch.nn as nn
+import math
 
-class SpatialEncoder(nn.Module):
-    def __init__(self, image_dim:tuple[int ,int, int]=(32 ,256, 256)):
-        super(SpatialEncoder, self).__init__()
-        _, self.W, self.H = image_dim
+def sequence(prev, T, cummulative):
+    y = math.exp(prev)
+    return (y/T)/(cummulative/T), T+1, cummulative + y
 
-        self.spat1 = nn.Conv2d(in_channels=3, out_channels=8, kernel_size=3, stride=2, padding=1)
-        self.spat2 = nn.Conv2d(in_channels=8, out_channels=16, kernel_size=3, stride=2, padding=1)
-        self.spat3 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1)
-        self.spat4 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1)
-        self.spat5 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=2, padding=1)
-        self.spat6 = nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1)
+def gauss(x, mu, sigma):
+    coeff = 1 / (sigma * math.sqrt(2 * math.pi))
+    exponent = -((x - mu) ** 2) / (2 * sigma ** 2)
+    return coeff * math.exp(exponent)
 
-        self.relu = nn.ReLU()
+def normalize(x):
+    total = max(x)
+    return [i / total for i in x]
 
-    def forward(self, x):
-        B, C, T, W, H = x.shape
-        x = x.view(B*T, C, W, H)
-        x = self.spat1(x)
-        x = self.relu(x)
-        x = self.relu(self.spat2(x))
-        x = self.spat3(x)
-        x = self.relu(x)
-        x = self.spat4(x)
-        x = self.relu(x)
-        x = self.relu(self.spat5(x))
-        x = self.relu(self.spat6(x))
-        x = x.view(B, T, 256, W//64, H//64)
-        return x
+def sample(weights):
+    probs = normalize(weights)
+    r = 0.5
+    cumulative = 0
+    for i, p in enumerate(probs):
+        cumulative += p
+        if r < cumulative:
+            return i
+    return len(probs) - 1
 
-model = SpatialEncoder()
+val = 0
+c = 1
 
-dummy_input = torch.rand(4, 3, 32, 256, 256)
-output = model(dummy_input)
-print(output)
-print(output.shape)
-print(output.flatten(start_dim=2).shape)
+with open("coeff.txt", "r") as f:
+    num = float(f.read())
+    if num <= 0:
+        num = 42
+
+n = sample([gauss(i, 100, max(int(num), 10)) for i in range(max(int(num), 10))]) * 2
+if n < 10:
+    n  = int(math.exp(n+5))
+if n > 100:
+    n = n % 100
+
+for i in range(1, int(num)):
+    val, _, c = sequence(val, i, c)
+    # print(f"{i}: {val}")
+rand = (n + val / max(1e-10,val**2))**2
+if rand > 100:
+    rand = rand%100
+if rand < 10:
+    rand = (rand * 694) % 100 
+with open("coeff.txt", "w") as f:
+    f.write(str(rand))
+print(rand)

@@ -7,21 +7,21 @@ from tokenizer import CharacterLevelTokenizer
 from torchtune.modules import KVCache
 
 class dot_product_attention(nn.Module):
-    def __init__(self, dropout=0.1, use_kv_cache=False, device="cpu", dtype=torch.bfloat16, input_dim=1024, head_size=32, context_window=1024):
+    def __init__(self, dropout=0.1, use_kv_cache=False, device="cpu", dtype=torch.bfloat16, input_dim=1024, head_size=32, context_window=1024, use_mask=True):
         super(dot_product_attention, self).__init__()
         self.dropout = nn.Dropout(dropout)
         self.device = device
         self.dtype = dtype
         self.head_size = head_size
         self.context_window = context_window
-
-        try:
-            mask = torch.tril(torch.ones((context_window, context_window), device=device, dtype=dtype))
-            self.register_buffer("mask", mask)
-        except RuntimeError:
-            mask = torch.tril(torch.ones((context_window, context_window), device=device, dtype=torch.bfloat16))
-            self.register_buffer("mask", mask) 
-
+        if use_mask:
+            try:
+                mask = torch.tril(torch.ones((context_window, context_window), device=device, dtype=dtype))
+                self.register_buffer("mask", mask)
+            except RuntimeError:
+                mask = torch.tril(torch.ones((context_window, context_window), device=device, dtype=torch.bfloat16))
+                self.register_buffer("mask", mask) 
+        self.use_mask = use_mask
         self.qkv = nn.Linear(input_dim, 3 * head_size, dtype=dtype, bias=False)
         self.to(device=device, dtype=dtype)
         self.use_kv_cache = use_kv_cache
@@ -62,7 +62,8 @@ class dot_product_attention(nn.Module):
             k_t = k.transpose(-2, -1) # (B, head_size, T)
 
         dots = torch.matmul(q, k_t) * (self.head_size ** -0.5) # (B, T, T)
-        dots = dots.masked_fill(self.mask[:T, :T] == 0, float('-inf')) # (B, T, T)
+        if self.use_mask:
+            dots = dots.masked_fill(self.mask[:T, :T] == 0, float('-inf')) # (B, T, T)
         attn = dots.softmax(dim=-1)
         attn = self.dropout(attn)
         # print(k_t.shape, v.shape)
@@ -219,6 +220,7 @@ class Network(nn.Module):
                         dropout=0.1,
                         use_kv_cache=False,
                         use_encoder=False,
+                        encoder=None,
                         encoder_context_window=None,
                         n_landmarks=None,
                         img_dim=None,
@@ -233,7 +235,10 @@ class Network(nn.Module):
             self.transformer.append(TransformerBlock(num_heads, n_embed, context_window, dropout=dropout, use_kv_cache=use_kv_cache, device=device, dtype=dtype))
         self.ln = nn.LayerNorm(n_embed, dtype=dtype)
         if use_encoder:
-            self.encoder = Transformer_Encoder(n_landmarks, img_dim, n_embed, num_heads, num_layer, encoder_context_window, device=device, dtype=dtype)
+            if encoder is not None:
+                self.encoder = encoder
+            else:
+                self.encoder = Transformer_Encoder(n_landmarks, img_dim, n_embed, num_heads, num_layer, encoder_context_window, device=device, dtype=dtype)
         self.out = nn.Linear(n_embed, vocab_size, dtype=dtype)
         # self.emb.weight = self.out.weight
         self.to(device=device, dtype=dtype)
@@ -253,6 +258,11 @@ class Network(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, x, landmarks=None, img=None):
+        if landmarks:
+            landmarks = landmarks.to(device=self.device, dtype=self.dtype)
+        if img:
+            img = img.to(device=self.device, dtype=self.dtype)
+        x = x.to(device=self.device, dtype=self.dtype)
         B, T = x.shape
         # idx = torch.arange(T, device=self.device)
         if self.use_encoder:
@@ -293,14 +303,17 @@ class SpatialEncoder(nn.Module):
         self.spat2 = nn.Conv2d(in_channels=8, out_channels=16, kernel_size=3, stride=2, padding=1)
         self.spat3 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=2, padding=1)
         self.spat4 = nn.Conv2d(in_channels=32, out_channels=64, kernel_size=3, stride=2, padding=1)
-        self.spat5 = nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=2, padding=1)
-        self.spat6 = nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=2, padding=1)
+        self.spat5 = nn.Conv3d(in_channels=64, out_channels=64, kernel_size=3, stride=2, padding=1)
+        self.spat6 = nn.Conv3d(in_channels=64, out_channels=128, kernel_size=3, stride=2, padding=1)
 
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        B, C, T, W, H = x.shape
-        x = x.view(B*T, C, W, H)
+        B, C, T, W, H = x.shape # 1, 3, 32, 256, 256
+        original_T = T
+        pad_amount = T % 2
+        x = F.pad(x, (0, 0, 0, 0, 0, pad_amount))
+        x = x.view(B*(T + pad_amount), C, W, H)
         x = self.spat1(x)
         x = self.relu(x)
         x = self.relu(self.spat2(x))
@@ -308,34 +321,72 @@ class SpatialEncoder(nn.Module):
         x = self.relu(x)
         x = self.spat4(x)
         x = self.relu(x)
+        x = x.view(B, 64, T + pad_amount, W//16, H//16)
         x = self.relu(self.spat5(x))
-        x = self.relu(self.spat6(x))
-        x = x.view(B, T, 256, W//64, H//64)
-        return x
+        x = self.relu(self.spat6(x)) # (B, C, T, W, H)
+        B, C, T, W, H = x.shape
+        x = x.view(B, T, C, W, H) # 1, 32, 128, 4, 4
+        return x, original_T
+
+class LandmarkCompression(nn.Module):
+    def __init__(self, n_landmarks):
+        super(LandmarkCompression, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels=n_landmarks, out_channels=n_landmarks, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv1d(in_channels=n_landmarks, out_channels=n_landmarks, kernel_size=3, stride=2, padding=1)
+        self.relu = nn.ReLU()
+
+    def forward(self, x):
+        original_T = x.shape[1]
+        x = x.transpose(-2, -1)
+        pad1 = original_T % 2
+        if pad1:
+            x = F.pad(x, (0, pad1))
+        x = self.relu(self.conv1(x))
+        T1 = x.shape[-1]
+        pad2 = T1 % 2
+        if pad2:
+            x = F.pad(x, (0, pad2))
+        x = self.relu(self.conv2(x))
+        x = x.transpose(-2, -1)
+        return x, original_T
 
 class Transformer_Encoder(nn.Module):
-    def __init__(self, n_landmarks, img_dim, n_embed, num_heads, n_layer, encoder_context_window, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, n_landmarks, img_dim, n_embed, num_heads, n_layer, encoder_context_window, device="cpu", dtype=torch.bfloat16, use_kv_cache=False):
         super(Transformer_Encoder, self).__init__()
         self.landmark_embed = nn.Linear(n_landmarks, n_embed//2)
         self.image_embed = nn.Linear(img_dim, n_embed//2)
         self.pos_embed = PosEmbedding(n_embed, encoder_context_window, device=device, dtype=dtype)
-        self.mh_attention = nn.ModuleList([TransformerBlock(num_heads, n_embed, encoder_context_window, use_kv_cache=True, device=device, dtype=dtype) for _ in range(n_layer)])
+        self.mh_attention = nn.ModuleList([TransformerBlock(num_heads, n_embed, encoder_context_window, use_kv_cache=use_kv_cache, device=device, dtype=dtype) for _ in range(n_layer)])
 
+        self.landmark_compression = LandmarkCompression(n_embed//2)
         self.img_compression = SpatialEncoder()
+
+        self.ln = nn.LayerNorm(n_embed)
+
+        self.out = nn.Linear(n_embed, n_embed*2)
+
         self.to(device=device, dtype=dtype)
+        self.device = device
+        self.dtype = dtype
         
     def forward(self, img, landmarks):
+        img = img.to(device=self.device, dtype=self.dtype)
+        landmarks = landmarks.to(device=self.device, dtype=self.dtype)
         # B, C, T, W, H = img.shape
         # B, T, C = landmarks.shape
-        compressed_img = self.img_compression(img) # (B, T, C, W, H)
+        compressed_img, original_T = self.img_compression(img) # (B, T, C, W, H)
         img_vec = compressed_img.flatten(start_dim=2) # (B, T, C * W * H)
         img_vec = self.image_embed(img_vec) # (B, T, n_embed/2)
         landmarks = self.landmark_embed(landmarks) # (B, T, n_embed/2)
+        landmarks, landmark_T = self.landmark_compression(landmarks) # (B, T, n_embed/2)
         x = torch.cat([img_vec, landmarks], dim=-1) # (B, T, n_embed)
         x = self.pos_embed(x)
+        x = self.ln(x)
         for block in self.mh_attention:
             x = block(x)
-        return x
+        x = self.out(x)
+        mu, logvar = torch.chunk(x, 2, dim=-1)  
+        return mu, logvar, original_T, landmark_T
 
 if __name__ == "__main__":
     from summary import ModelSummary
@@ -354,7 +405,7 @@ if __name__ == "__main__":
                     n_landmarks = 210,
                     img_dim=4096,
                     device="cpu",
-                    dtype=torch.float32)
+                    dtype=torch.bfloat16)
     # model.load_state_dict(torch.load("model.pt"))
     ModelSummary(model)
     x = torch.tensor(tokenizer.encode("C")).unsqueeze(0)

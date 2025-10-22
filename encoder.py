@@ -148,6 +148,8 @@ class Transformer_Encoder(nn.Module):
 
         self.out = nn.Linear(n_embed, n_embed*2)
 
+        self.normalize = nn.LayerNorm(n_embed)
+
         self.to(device=device, dtype=dtype)
         self.device = device
         self.dtype = dtype
@@ -157,6 +159,7 @@ class Transformer_Encoder(nn.Module):
         landmarks = landmarks.to(device=self.device, dtype=self.dtype)
         # B, C, T, W, H = img.shape
         # B, T, C = landmarks.shape
+        landmarks = self.normalize(landmarks)
         compressed_img, original_T = self.img_compression(img) # (B, T, C, W, H)
         img_vec = compressed_img.flatten(start_dim=2) # (B, T, C * W * H)
         img_vec = self.image_embed(img_vec) # (B, T, n_embed/2)
@@ -223,13 +226,13 @@ class VAE(nn.Module):
 
 if __name__ == "__main__":
     from summary import ModelSummary
-    model = Transformer_Encoder(n_landmarks=68, img_dim=128*4*4, n_embed=384, num_heads=4, n_layer=4, encoder_context_window=512, device="cpu", dtype=torch.bfloat16)
+    model = Transformer_Encoder(n_landmarks=1106, img_dim=128*4*4, n_embed=256, num_heads=2, n_layer=2, encoder_context_window=4096, device="cpu", dtype=torch.bfloat16)
     ModelSummary(model)
     img = torch.rand(1, 3, 33, 256, 256)
-    landmarks = torch.rand(1, 33, 68)
+    landmarks = torch.rand(1, 33, 1106)
     mu, logvar, img_T, lm_T = model(img, landmarks)
     print(mu.shape, logvar.shape)
-    decoder = Transformer_Decoder(n_landmarks=68, img_dim=128*4*4, n_embed=384, num_heads=4, n_layer=4, encoder_context_window=512, device="cpu", dtype=torch.bfloat16)
+    decoder = Transformer_Decoder(n_landmarks=1106, img_dim=128*4*4, n_embed=256, num_heads=2, n_layer=2, encoder_context_window=4096, device="cpu", dtype=torch.bfloat16)
     ModelSummary(decoder)
     out = decoder(mu, img_T, lm_T)
     print(out[0].shape, out[1].shape)

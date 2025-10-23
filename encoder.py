@@ -148,7 +148,7 @@ class Transformer_Encoder(nn.Module):
 
         self.out = nn.Linear(n_embed, n_embed*2)
 
-        self.normalize = nn.LayerNorm(n_embed)
+        self.normalize = nn.LayerNorm(n_landmarks)
 
         self.to(device=device, dtype=dtype)
         self.device = device

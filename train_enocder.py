@@ -190,7 +190,15 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
         device = torch.device("cuda", rank)
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
+
+    if device.type == "cuda":
+        bf16_supported = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+        if bf16_supported:
+            dtype = torch.bfloat16
+        else:
+            dtype = torch.float16
+    else:
+        dtype = torch.float32
 
     video_dir = Path(args.video_dir)
     distance_dir = Path(args.distance_dir)
@@ -282,7 +290,10 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
 
     optimizer = torch.optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()), lr=args.lr)
 
-    scaler = torch.amp.GradScaler(enabled=device.type == "cuda") if hasattr(torch, "amp") else None
+    if hasattr(torch, "amp") and device.type == "cuda":
+        scaler = torch.amp.GradScaler(enabled=dtype == torch.float16)
+    else:
+        scaler = None
 
     printed_shapes = False
 
@@ -398,6 +409,7 @@ def parse_args():
     parser.add_argument("--frame_epochs", type=int, default=0)
     parser.add_argument("--frame_batch_size", type=int, default=None)
     parser.add_argument("--test", action="store_true")
+    parser.add_argument("--distributed", action="store_true", help="Enable multi-GPU training via torch.multiprocessing.spawn")
     return parser.parse_args()
 
 
@@ -405,7 +417,7 @@ if __name__ == "__main__":
     args = parse_args()
     if torch.cuda.is_available():
         world_size = torch.cuda.device_count()
-        if world_size > 1:
+        if world_size > 1 and args.distributed:
             os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
             os.environ.setdefault("MASTER_PORT", "29500")
             mp.spawn(train_worker, args=(world_size, args), nprocs=world_size, join=True)

@@ -2,7 +2,7 @@ import pickle
 
 class CharacterLevelTokenizer:
     def __init__(self, chars=""):
-        self.chars = sorted(list(set(chars)))
+        self.chars = ['<|gaytokennotfound|>'] + sorted(list(set(chars)))
         self.char_to_int = {ch: i for i, ch in enumerate(self.chars)}
         self.int_to_char = {i: ch for i, ch in enumerate(self.chars)}
 
@@ -10,7 +10,13 @@ class CharacterLevelTokenizer:
         return len(self.chars)
 
     def encode(self, s):
-        return [self.char_to_int[ch] for ch in s]
+        tokens = []
+        for ch in s:
+            if ch in self.char_to_int:
+                tokens.append(self.char_to_int[ch])
+            else:
+                tokens.append(self.char_to_int['<|gaytokennotfound|>'])
+        return tokens
 
     def decode(self, l):
         return ''.join([self.int_to_char[i] for i in l])

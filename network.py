@@ -258,9 +258,9 @@ class Network(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, x, landmarks=None, img=None):
-        if landmarks:
+        if landmarks is not None:
             landmarks = landmarks.to(device=self.device, dtype=self.dtype)
-        if img:
+        if img is not None:
             img = img.to(device=self.device, dtype=self.dtype)
         x = x.to(device=self.device, dtype=self.dtype)
         B, T = x.shape
@@ -385,7 +385,7 @@ class Transformer_Encoder(nn.Module):
         for block in self.mh_attention:
             x = block(x)
         x = self.out(x)
-        mu, logvar = torch.chunk(x, 2, dim=-1)  
+        mu, logvar = torch.chunk(x, 2, dim=-1)
         return mu, logvar, original_T, landmark_T
 
 if __name__ == "__main__":
@@ -393,17 +393,17 @@ if __name__ == "__main__":
     with open("dataset.txt", "r") as f:
         text = f.read()
     tokenizer = CharacterLevelTokenizer().load("tokenizer.pkl")
-    model = Network(num_heads=6,
-                    num_layer=6,
-                    n_embed=384,
-                    context_window=512,
+    model = Network(num_heads=2,
+                    num_layer=2,
+                    n_embed=256,
+                    context_window=4096,
                     vocab_size=len(tokenizer),
                     dropout=0.2,
                     use_kv_cache=True,
                     use_encoder=True,
                     encoder_context_window=512,
                     n_landmarks = 210,
-                    img_dim=4096,
+                    img_dim=128 * 4 * 4,
                     device="cpu",
                     dtype=torch.bfloat16)
     # model.load_state_dict(torch.load("model.pt"))

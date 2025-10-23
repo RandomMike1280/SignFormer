@@ -2,7 +2,8 @@ import cv2
 import mediapipe as mp
 import numpy as np
 from pathlib import Path
-from tqdm import tqdm
+import tqdm
+import os
 
 # --- Constants and Initialization ---
 NUM_FACE_LANDMARKS = 478
@@ -93,7 +94,7 @@ def process_video(input_path: str, output_video_path: str, output_data_path: str
     ) as holistic:
         
         # Process video frame by frame
-        for _ in tqdm(range(total_frames), desc=f"Processing {input_path.name}"):
+        for _ in tqdm.tqdm(range(total_frames), desc=f"Processing {input_path.name}"):
             ret, frame = cap.read()
             if not ret:
                 break
@@ -137,12 +138,13 @@ def process_video(input_path: str, output_video_path: str, output_data_path: str
 # --- Example Usage ---
 if __name__ == "__main__":
     # 1. Define file paths
-    for name in [
-        r'2', r'3', r'4',r'5', r'6', r'7', r'8', r'9', r'10'
-    ]:
-        INPUT_VIDEO = fr"dataset\videos\{name}.mp4"
-        OUTPUT_VIDEO = fr"dataset\visualizations\{name}.mp4"
-        OUTPUT_DATA = fr"dataset\distances\{name}.npz"
+    namessss = os.listdir(r'dataset\Videos')
+    namessss = [v.replace('.mp4', '') for v in namessss]
+
+    for i in tqdm.trange(len(namessss), ):
+        INPUT_VIDEO = fr"dataset\Videos\{namessss[i]}.mp4"
+        OUTPUT_VIDEO = fr"dataset\visualizations\{i+11}.mp4"
+        OUTPUT_DATA = fr"dataset\distances\{i+11}.npz"
 
         if not Path(INPUT_VIDEO).exists():
             raise Exception('Path does not exist')

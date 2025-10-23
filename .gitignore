@@ -1,5 +1,6 @@
 # Ignore dataset files
 dataset*
+refined_dataset*
 
 # Ignore model files
 model*

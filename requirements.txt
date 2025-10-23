@@ -1,0 +1,8 @@
+mediapipe
+numpy
+opencv-python
+rich
+tiktoken
+torch
+torchtune
+tqdm

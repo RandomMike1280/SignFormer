@@ -182,7 +182,7 @@ class TransformerBlock(nn.Module):
     def forward(self, x, encoder_output=None):
         x = x + self.attn(self.ln1(x))
         x = x + self.ff(self.ln2(x))
-        if self.use_cross_att:
+        if self.use_cross_att and encoder_output is not None:
             x = x + self.cross_att(self.ln3(x), encoder_output)
             x = x + self.ff2(self.ln4(x))
         return x
@@ -232,7 +232,7 @@ class Network(nn.Module):
         # self.pos_embed = nn.Embedding(context_window, n_embed, dtype=dtype)
         self.transformer = nn.ModuleList()
         for _ in range(num_layer):
-            self.transformer.append(TransformerBlock(num_heads, n_embed, context_window, dropout=dropout, use_kv_cache=use_kv_cache, device=device, dtype=dtype))
+            self.transformer.append(TransformerBlock(num_heads, n_embed, context_window, dropout=dropout, use_cross_att=use_encoder, use_kv_cache=use_kv_cache, device=device, dtype=dtype))
         self.ln = nn.LayerNorm(n_embed, dtype=dtype)
         if use_encoder:
             if encoder is not None:
@@ -415,9 +415,9 @@ if __name__ == "__main__":
     landmarks = torch.rand(1, 1, 210)
     # print(x)
     y = model(x, landmarks, img)
-    # print(y.shape)
-    # seq = model.generate(x, max_length=500)
-    # print(seq)
-    # seq = list(seq[0].tolist())
-    # print(seq)
-    # print(tokenizer.decode(seq))
+    print(y.shape)
+    seq = model.generate(x, max_length=500)
+    print(seq)
+    seq = list(seq[0].tolist())
+    print(seq)
+    print(tokenizer.decode(seq))

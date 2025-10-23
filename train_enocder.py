@@ -1,13 +1,18 @@
 import argparse
 import math
+import os
 from bisect import bisect_left
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from encoder import Transformer_Encoder, Transformer_Decoder
 
@@ -179,8 +184,12 @@ def collate_single_frames(batch):
     return frame_tensor, distance_tensor
 
 
-def train(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
+    if distributed:
+        torch.cuda.set_device(rank)
+        device = torch.device("cuda", rank)
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
     video_dir = Path(args.video_dir)
@@ -200,10 +209,12 @@ def train(args):
         mode="videos",
         subset_fraction=subset_fraction,
     )
+    video_sampler = DistributedSampler(video_dataset, num_replicas=world_size, rank=rank, shuffle=True) if distributed else None
     video_loader = DataLoader(
         video_dataset,
         batch_size=args.batch_size,
-        shuffle=True,
+        shuffle=not distributed,
+        sampler=video_sampler,
         collate_fn=collate_full_sequence,
     )
 
@@ -219,14 +230,19 @@ def train(args):
             subset_fraction=subset_fraction,
         )
         if len(frame_dataset) > 0:
+            frame_sampler = DistributedSampler(frame_dataset, num_replicas=world_size, rank=rank, shuffle=True) if distributed else None
             frame_loader = DataLoader(
                 frame_dataset,
                 batch_size=args.frame_batch_size or args.batch_size,
-                shuffle=True,
+                shuffle=not distributed,
+                sampler=frame_sampler,
                 collate_fn=collate_single_frames,
             )
         else:
-            frame_epochs = 0
+            frame_sampler = None
+    else:
+        frame_sampler = None
+        frame_epochs = 0
 
     if len(video_dataset) == 0:
         raise ValueError("No videos found for training")
@@ -258,6 +274,12 @@ def train(args):
     encoder.train()
     decoder.train()
 
+    if distributed:
+        encoder = DDP(encoder, device_ids=[rank], output_device=rank)
+        decoder = DDP(decoder, device_ids=[rank], output_device=rank)
+        encoder.train()
+        decoder.train()
+
     optimizer = torch.optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()), lr=args.lr)
 
     scaler = torch.amp.GradScaler(enabled=device.type == "cuda") if hasattr(torch, "amp") else None
@@ -269,13 +291,18 @@ def train(args):
         if epoch < frame_epochs and frame_loader is not None:
             current_loader = frame_loader
             stage = "frames"
+            current_sampler = frame_sampler
         else:
             current_loader = video_loader
             stage = "videos"
+            current_sampler = video_sampler
+        if distributed and current_sampler is not None:
+            current_sampler.set_epoch(epoch)
         if args.test:
-            print(f"Num Epochs: {args.epochs}")
-            print(f"Num Frame Epochs: {frame_epochs}")
-            print(f"Length loader: {len(current_loader)}")
+            if rank == 0:
+                print(f"Num Epochs: {args.epochs}")
+                print(f"Num Frame Epochs: {frame_epochs}")
+                print(f"Length loader: {len(current_loader)}")
         for video, distances in current_loader:
             optimizer.zero_grad(set_to_none=True)
             video = video.to(device=device, dtype=torch.float32) / 255.0
@@ -291,7 +318,7 @@ def train(args):
                 z = reparameterize(mu, logvar)
                 recon_landmarks, recon_video = decoder(z, img_T, lm_T)
 
-                if args.test and not printed_shapes:
+                if args.test and not printed_shapes and rank == 0:
                     print("Input video_for_encoder shape:", tuple(video_for_encoder.shape))
                     print("Input distances shape:", tuple(distances.shape))
                     print("Encoder outputs - mu shape:", tuple(mu.shape), "logvar shape:", tuple(logvar.shape))
@@ -306,7 +333,8 @@ def train(args):
 
             if scaler and scaler.is_enabled():
                 if args.test:
-                    print("Performing backward pass with gradient scaling.")
+                    if rank == 0:
+                        print("Performing backward pass with gradient scaling.")
                     pass
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
@@ -318,17 +346,35 @@ def train(args):
                 loss.backward()
                 optimizer.step()
             if args.test:
-                print(f"Loss: {kld.item():.4f} | {img_loss.item():.4f} | {landmark_loss.item():.4f}")
+                if rank == 0:
+                    print(f"Loss: {kld.item():.4f} | {img_loss.item():.4f} | {landmark_loss.item():.4f}")
             epoch_loss += loss.item()
 
-        avg_loss = epoch_loss / len(current_loader)
-        print(f"Epoch {epoch + 1}/{args.epochs} [{stage}] - Loss: {avg_loss:.4f}")
+        if distributed:
+            loss_tensor = torch.tensor(epoch_loss, device=device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            epoch_loss = loss_tensor.item()
+            denom = len(current_loader) * world_size
+        else:
+            denom = len(current_loader)
+        avg_loss = epoch_loss / denom
+        if rank == 0:
+            print(f"Epoch {epoch + 1}/{args.epochs} [{stage}] - Loss: {avg_loss:.4f}")
 
-    torch.save({
-        "encoder": encoder.state_dict(),
-        "decoder": decoder.state_dict(),
-        "args": vars(args),
-    }, args.output)
+    if not distributed or rank == 0:
+        torch.save({
+            "encoder": encoder.module.state_dict() if distributed else encoder.state_dict(),
+            "decoder": decoder.module.state_dict() if distributed else decoder.state_dict(),
+            "args": vars(args),
+        }, args.output)
+
+
+def train_worker(rank: int, world_size: int, args):
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    try:
+        train(args, rank=rank, world_size=world_size, distributed=True)
+    finally:
+        dist.destroy_process_group()
 
 
 def parse_args():
@@ -357,4 +403,13 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    train(args)
+    if torch.cuda.is_available():
+        world_size = torch.cuda.device_count()
+        if world_size > 1:
+            os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+            os.environ.setdefault("MASTER_PORT", "29500")
+            mp.spawn(train_worker, args=(world_size, args), nprocs=world_size, join=True)
+        else:
+            train(args)
+    else:
+        train(args)

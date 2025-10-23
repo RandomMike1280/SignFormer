@@ -1,13 +1,18 @@
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+import importlib
 import shutil
 import cv2
 import numpy as np
 from datasets import Video, load_dataset
 import mediapipe as mp
 from tqdm.auto import tqdm
-from train_enocder import train
+
+if __package__ in (None, ""):
+    from train_enocder import train
+else:
+    train = importlib.import_module(".train_enocder", __package__).train
 
 NUM_FACE_LANDMARKS = 478
 NUM_POSE_LANDMARKS = 33

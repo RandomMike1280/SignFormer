@@ -267,6 +267,8 @@ class Network(nn.Module):
         # idx = torch.arange(T, device=self.device)
         if self.use_encoder and landmarks is not None and img is not None:
             encoder_vec = self.encoder(img, landmarks)
+        else:
+            encoder_vec = None
         x = x.to(device=self.device, dtype=torch.int32)
         x = self.emb(x) * (self.d_model ** 0.5)
         x = self.pos_embed(x)

@@ -290,8 +290,8 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
 
     optimizer = torch.optim.AdamW(list(encoder.parameters()) + list(decoder.parameters()), lr=args.lr)
 
-    if hasattr(torch, "amp") and device.type == "cuda":
-        scaler = torch.amp.GradScaler(enabled=dtype == torch.float16)
+    if device.type == "cuda" and dtype == torch.float16 and hasattr(torch, "amp"):
+        scaler = torch.amp.GradScaler()
     else:
         scaler = None
 
@@ -314,7 +314,7 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
                 print(f"Num Epochs: {args.epochs}")
                 print(f"Num Frame Epochs: {frame_epochs}")
                 print(f"Length loader: {len(current_loader)}")
-        for video, distances in current_loader:
+        for i, (video, distances) in enumerate(current_loader):
             optimizer.zero_grad(set_to_none=True)
             video = video.to(device=device, dtype=torch.float32) / 255.0
             if dtype != torch.float32:
@@ -324,7 +324,8 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
             video_for_encoder = video.permute(0, 1, 2, 4, 3)  # (B, C, T, W, H)
             video_target = video.permute(0, 2, 1, 3, 4)  # (B, T, C, H, W)
 
-            with torch.cuda.amp.autocast(enabled=device.type == "cuda", dtype=dtype):
+            autocast_kwargs = {"dtype": dtype} if dtype in (torch.float16, torch.bfloat16) else {}
+            with torch.amp.autocast(device_type="cuda", enabled=device.type == "cuda", **autocast_kwargs):
                 mu, logvar, img_T, lm_T = encoder(video_for_encoder, distances)
                 z = reparameterize(mu, logvar)
                 recon_landmarks, recon_video = decoder(z, img_T, lm_T)
@@ -358,7 +359,10 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
                 optimizer.step()
             if args.test:
                 if rank == 0:
-                    print(f"Loss: {kld.item():.4f} | {img_loss.item():.4f} | {landmark_loss.item():.4f}")
+                    print(f"Loss: {args.beta_kld * kld.item():.4f} | {args.beta_img * img_loss.item():.4f} | {args.beta_landmarks * landmark_loss.item():.4f}")
+            if not args.test and i % (len(current_loader) // 10) == 0:
+                if rank == 0:
+                    print(f"Epoch {epoch + 1}/{args.epochs} [{stage}] - Loss: {loss.item():.4f} | {kld.item():.4f} | {img_loss.item():.4f} | {landmark_loss.item():.4f}")
             epoch_loss += loss.item()
 
         if distributed:
@@ -400,7 +404,7 @@ def parse_args():
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--context_window", type=int, default=8192)
     parser.add_argument("--n_landmarks", type=int, default=1106)
-    parser.add_argument("--beta_kld", type=float, default=1.0)
+    parser.add_argument("--beta_kld", type=float, default=0.005)
     parser.add_argument("--beta_img", type=float, default=1.0)
     parser.add_argument("--beta_landmarks", type=float, default=1.0)
     parser.add_argument("--output", type=str, default="encoder_model.pt")

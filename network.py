@@ -265,7 +265,7 @@ class Network(nn.Module):
         x = x.to(device=self.device, dtype=self.dtype)
         B, T = x.shape
         # idx = torch.arange(T, device=self.device)
-        if self.use_encoder:
+        if self.use_encoder and landmarks is not None and img is not None:
             encoder_vec = self.encoder(img, landmarks)
         x = x.to(device=self.device, dtype=torch.int32)
         x = self.emb(x) * (self.d_model ** 0.5)

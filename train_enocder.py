@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.utils.tensorboard import SummaryWriter
 
 from encoder import Transformer_Encoder, Transformer_Decoder
 
@@ -200,6 +201,8 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
     else:
         dtype = torch.float32
 
+    is_main_process = not distributed or rank == 0
+
     video_dir = Path(args.video_dir)
     distance_dir = Path(args.distance_dir)
 
@@ -254,6 +257,16 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
 
     if len(video_dataset) == 0:
         raise ValueError("No videos found for training")
+
+    checkpoint_dir = Path(args.checkpoint_dir)
+    log_dir = Path(args.log_dir)
+    if is_main_process:
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        writer = SummaryWriter(log_dir=str(log_dir))
+    else:
+        writer = None
+    global_step = 0
 
     encoder = Transformer_Encoder(
         n_landmarks=args.n_landmarks,
@@ -357,13 +370,23 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
                     pass
                 loss.backward()
                 optimizer.step()
+            loss_value = float(loss.detach().cpu())
+            kld_value = float(kld.detach().cpu())
+            img_loss_value = float(img_loss.detach().cpu())
+            landmark_loss_value = float(landmark_loss.detach().cpu())
+            if writer is not None:
+                writer.add_scalar("loss/total", loss_value, global_step)
+                writer.add_scalar("loss/kld", args.beta_kld * kld_value, global_step)
+                writer.add_scalar("loss/img", args.beta_img * img_loss_value, global_step)
+                writer.add_scalar("loss/landmarks", args.beta_landmarks * landmark_loss_value, global_step)
             if args.test:
                 if rank == 0:
                     print(f"Loss: {args.beta_kld * kld.item():.4f} | {args.beta_img * img_loss.item():.4f} | {args.beta_landmarks * landmark_loss.item():.4f}")
             if not args.test and i % (len(current_loader) // 10) == 0:
                 if rank == 0:
                     print(f"Epoch {epoch + 1}/{args.epochs} [{stage}] - Loss: {loss.item():.4f} | {kld.item():.4f} | {img_loss.item():.4f} | {landmark_loss.item():.4f}")
-            epoch_loss += loss.item()
+            epoch_loss += loss_value
+            global_step += 1
 
         if distributed:
             loss_tensor = torch.tensor(epoch_loss, device=device)
@@ -375,13 +398,34 @@ def train(args, rank: int = 0, world_size: int = 1, distributed: bool = False):
         avg_loss = epoch_loss / denom
         if rank == 0:
             print(f"Epoch {epoch + 1}/{args.epochs} [{stage}] - Loss: {avg_loss:.4f}")
+        if writer is not None:
+            writer.add_scalar("loss/epoch_avg", avg_loss, epoch + 1)
+        if is_main_process and ((epoch + 1) % args.save_interval == 0):
+            checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch + 1}.pt"
+            torch.save({
+                "encoder": encoder.module.state_dict() if distributed else encoder.state_dict(),
+                "decoder": decoder.module.state_dict() if distributed else decoder.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scaler": scaler.state_dict() if scaler else None,
+                "args": vars(args),
+                "epoch": epoch + 1,
+            }, checkpoint_path)
 
-    if not distributed or rank == 0:
+    if writer is not None:
+        writer.close()
+
+    if is_main_process:
+        final_path = Path(args.output)
+        if not final_path.is_absolute():
+            final_path = checkpoint_dir / final_path
         torch.save({
             "encoder": encoder.module.state_dict() if distributed else encoder.state_dict(),
             "decoder": decoder.module.state_dict() if distributed else decoder.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scaler": scaler.state_dict() if scaler else None,
             "args": vars(args),
-        }, args.output)
+            "epoch": args.epochs,
+        }, final_path)
 
 
 def train_worker(rank: int, world_size: int, args):
@@ -404,14 +448,17 @@ def parse_args():
     parser.add_argument("--n_layers", type=int, default=2)
     parser.add_argument("--context_window", type=int, default=8192)
     parser.add_argument("--n_landmarks", type=int, default=1106)
-    parser.add_argument("--beta_kld", type=float, default=0.005)
-    parser.add_argument("--beta_img", type=float, default=1.0)
-    parser.add_argument("--beta_landmarks", type=float, default=1.0)
+    parser.add_argument("--beta_kld", type=float, default=0.00005)
+    parser.add_argument("--beta_img", type=float, default=5.0)
+    parser.add_argument("--beta_landmarks", type=float, default=5.0)
     parser.add_argument("--output", type=str, default="encoder_model.pt")
     parser.add_argument("--max_frames", type=int, default=None)
     parser.add_argument("--image_size", type=int, default=256)
     parser.add_argument("--frame_epochs", type=int, default=0)
     parser.add_argument("--frame_batch_size", type=int, default=None)
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument("--log_dir", type=str, default="runs/encoder")
+    parser.add_argument("--save_interval", type=int, default=1)
     parser.add_argument("--test", action="store_true")
     parser.add_argument("--distributed", action="store_true", help="Enable multi-GPU training via torch.multiprocessing.spawn")
     return parser.parse_args()

@@ -11,7 +11,9 @@ tokenizer.plk
 # Common Python artifacts
 __pycache__/
 *.py[cod]
+runs
 
 # Ignore model files
 model.pt
 encoder_model.pt
+checkpoints

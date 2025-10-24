@@ -141,7 +141,7 @@ class Transformer_Encoder(nn.Module):
         self.pos_embed = PosEmbedding(n_embed, encoder_context_window, device=device, dtype=dtype)
         self.mh_attention = nn.ModuleList([TransformerBlock(num_heads, n_embed, encoder_context_window, use_kv_cache=use_kv_cache, device=device, dtype=dtype) for _ in range(n_layer)])
 
-        self.landmark_compression = LandmarkCompression(n_embed//2)
+        self.landmark_compression = LandmarkCompression(n_landmarks)
         self.img_compression = SpatialEncoder()
 
         self.ln = nn.LayerNorm(n_embed)
@@ -160,12 +160,12 @@ class Transformer_Encoder(nn.Module):
         # B, C, T, W, H = img.shape
         # B, T, C = landmarks.shape
         landmarks = self.normalize(landmarks)
-        compressed_img, original_T = self.img_compression(img) # (B, T, C, W, H)
-        img_vec = compressed_img.flatten(start_dim=2) # (B, T, C * W * H)
-        img_vec = self.image_embed(img_vec) # (B, T, n_embed/2)
-        landmarks = self.landmark_embed(landmarks) # (B, T, n_embed/2)
-        landmarks, landmark_T = self.landmark_compression(landmarks) # (B, T, n_embed/2)
-        x = torch.cat([img_vec, landmarks], dim=-1) # (B, T, n_embed)
+        compressed_img, original_T = self.img_compression(img) # (B, T//4, C, W, H)
+        img_vec = compressed_img.flatten(start_dim=2) # (B, T//4, C * W * H)
+        img_vec = self.image_embed(img_vec) # (B, T//4, n_embed/2)
+        landmarks, landmark_T = self.landmark_compression(landmarks) # (B, T//2, n_landmarks)
+        landmarks = self.landmark_embed(landmarks) # (B, T//4, n_embed/2)
+        x = torch.cat([img_vec, landmarks], dim=-1) # (B, T//4, n_embed)
         x = self.pos_embed(x)
         x = self.ln(x)
         for block in self.mh_attention:
@@ -202,6 +202,7 @@ class Transformer_Decoder(nn.Module):
 
 class VAE(nn.Module):
     def __init__(self, encoder, decoder, device="cpu", dtype=torch.bfloat16):
+        super(VAE, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
 
@@ -217,7 +218,7 @@ class VAE(nn.Module):
 
         z = self.reparameterize(mu, logvar)
 
-        recon = self.decoder(Z)
+        recon = self.decoder(z)
 
         return recon, mu, logvar
 

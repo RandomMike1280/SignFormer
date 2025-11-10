@@ -1,15 +1,14 @@
 import torch
 
-logvar = torch.randn(1, 4, 4, dtype=torch.bfloat16)
-std = torch.exp(0.5 * logvar)
-eps = torch.randn_like(std)
-mu = torch.randn(1, 4, 4, dtype=torch.bfloat16)
-z = mu + std * eps
+def interleave_concat(x1, x2):
+    T, C = x1.shape
+    x1_reshaped = x1.flatten().unsqueeze(-1).transpose(-2, -1)
+    x2_reshaped = x2.flatten().unsqueeze(-1).transpose(-2, -1)
+    x_rot_half = torch.cat((x1_reshaped, x2_reshaped), dim=-1).reshape(T, C*2)
+    return x_rot_half
 
-# std = e^logvar/2
-# eps = N(0,1)
-# z = mu + std * eps 
-
-# print(logvar)
-print(std)
-print(eps)
+x = torch.randn(2, 4)
+y = torch.randn(2, 4)
+print(x)
+print(y)
+print(interleave_concat(x, y))

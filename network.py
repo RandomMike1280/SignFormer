@@ -136,11 +136,11 @@ class Multihead_Cross_Attention(nn.Module):
         return out
 
 class Multihead_Attention(nn.Module):
-    def __init__(self, num_heads, n_embed, context_window, head_size, dropout=0.1, use_kv_cache=False, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, num_heads, n_embed, context_window, head_size, dropout=0.1, use_kv_cache=False, use_mask=True, device="cpu", dtype=torch.bfloat16):
         super(Multihead_Attention, self).__init__()
         self.heads = nn.ModuleList()
         for _ in range(num_heads):
-            self.heads.append(dot_product_attention(dropout=dropout, device=device, dtype=dtype, input_dim=n_embed, context_window=context_window, head_size=head_size, use_kv_cache=use_kv_cache))
+            self.heads.append(dot_product_attention(dropout=dropout, device=device, dtype=dtype, input_dim=n_embed, context_window=context_window, head_size=head_size, use_kv_cache=use_kv_cache, use_mask=use_mask))
         self.proj = nn.Linear(n_embed, n_embed)
         self.dropout = nn.Dropout(dropout)
         self.to(device=device, dtype=dtype)
@@ -164,7 +164,7 @@ class FeedForward(nn.Module):
         return x
 
 class TransformerBlock(nn.Module):
-    def __init__(self, num_heads, n_embed, context_window, dropout=0.1, use_kv_cache=False, use_cross_att=False, device="cpu", dtype=torch.bfloat16):
+    def __init__(self, num_heads, n_embed, context_window, dropout=0.1, use_kv_cache=False, use_cross_att=False, use_mask=True, device="cpu", dtype=torch.bfloat16):
         super(TransformerBlock, self).__init__()
         head_size = n_embed // num_heads
         if use_cross_att:
@@ -172,7 +172,7 @@ class TransformerBlock(nn.Module):
             self.ln3 = nn.LayerNorm(n_embed, dtype=dtype)
             self.ln4 = nn.LayerNorm(n_embed, dtype=dtype)
             self.ff2 = FeedForward(n_embed, dropout=dropout, device=device, dtype=dtype)
-        self.attn = Multihead_Attention(num_heads, n_embed, context_window, head_size=head_size, dropout=dropout, device=device, dtype=dtype, use_kv_cache=use_kv_cache)
+        self.attn = Multihead_Attention(num_heads, n_embed, context_window, head_size=head_size, dropout=dropout, device=device, dtype=dtype, use_kv_cache=use_kv_cache, use_mask=use_mask)
         self.ff = FeedForward(n_embed, dropout=dropout, device=device, dtype=dtype)
         self.ln1 = nn.LayerNorm(n_embed, dtype=dtype)
         self.ln2 = nn.LayerNorm(n_embed, dtype=dtype)
